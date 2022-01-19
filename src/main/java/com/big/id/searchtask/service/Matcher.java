@@ -3,6 +3,7 @@ package com.big.id.searchtask.service;
 import com.big.id.searchtask.entity.NameOffset;
 import com.big.id.searchtask.entity.OffsetDto;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.lang.NonNull;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -10,20 +11,11 @@ import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ForkJoinPool;
-import java.util.stream.IntStream;
 
 @Service
 public class Matcher {
-
-    private static final String LINE_BRAKE = "\n";
-    // provides "reserve" of tasks that amortize delays and unevenness
-    private static final int THRESHOLD_LOAD_FACTOR = 100;
-    private int generalContentValuePosition;
-
     @Value("#{'${names}'.split(',')}")
     private List<String> names;
-    protected static final ConcurrentMap<String, List<NameOffset>> SEARCH_RESULT_MAP = new ConcurrentHashMap<>();
-    protected static int recursiveSearcherThreshold;
 
     private final Reader reader;
 
@@ -31,29 +23,31 @@ public class Matcher {
         this.reader = reader;
     }
 
+    @NonNull
     public ConcurrentMap<String, List<NameOffset>> getSearchResultMap() {
-        final var splitContent = reader.getContent().split(LINE_BRAKE);
-        final var offsetDtos = new ArrayList<OffsetDto>(splitContent.length);
+        final var splitContent = reader.getContent().split("\n");
+        final var filteredContent = new ArrayList<OffsetDto>(splitContent.length);
+        var generalContentValuePosition = 0;
 
-        IntStream.range(0, splitContent.length).forEachOrdered(i -> {
-            final var contentValue = splitContent[i];
-            offsetDtos.add(new OffsetDto()
+        for (int i = 0; i < splitContent.length; i++) {
+            final String contentValue = splitContent[i];
+            if (contentValue.equals("")) {
+                continue;
+            }
+            filteredContent.add(new OffsetDto()
                     .setContentValue(contentValue)
                     .setLinePosition(i + 1)
                     .setContentValuePosition(generalContentValuePosition));
-            generalContentValuePosition += contentValue.chars().count();
-        });
-        final var filteredContent = offsetDtos
-                .parallelStream()
-                .filter(offsetDto -> !offsetDto.getContentValue().equals(""))
-                .toList();
+            generalContentValuePosition += contentValue.length();
+        }
 
-        recursiveSearcherThreshold = setRecursiveSearchThreshold(filteredContent.size());
+        final var searchResultMap = new ConcurrentHashMap<String, List<NameOffset>>(names.size());
+        final var recursiveSearcherThreshold = getRecursiveSearchThreshold(filteredContent.size());
 
         ForkJoinPool
                 .commonPool()
-                .invoke(new RecursiveSearcher(names, filteredContent));
-        return SEARCH_RESULT_MAP;
+                .invoke(new RecursiveSearcher(recursiveSearcherThreshold, names, searchResultMap, filteredContent));
+        return searchResultMap;
     }
 
     /**
@@ -65,8 +59,9 @@ public class Matcher {
      * @param taskSize - the size of the task
      * @return threshold
      */
-    public int setRecursiveSearchThreshold(final int taskSize) {
-        return taskSize / (Runtime.getRuntime().availableProcessors() * THRESHOLD_LOAD_FACTOR);
+    public int getRecursiveSearchThreshold(final int taskSize) {
+        // provides "reserve" of tasks that amortize delays and unevenness
+        final var thresholdLoadFactor = 100;
+        return taskSize / (Runtime.getRuntime().availableProcessors() * thresholdLoadFactor);
     }
 }
-

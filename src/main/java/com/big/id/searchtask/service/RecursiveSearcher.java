@@ -2,34 +2,29 @@ package com.big.id.searchtask.service;
 
 import com.big.id.searchtask.entity.NameOffset;
 import com.big.id.searchtask.entity.OffsetDto;
+import lombok.AllArgsConstructor;
 import org.springframework.lang.NonNull;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.RecursiveAction;
+import java.util.regex.Pattern;
 
-import static com.big.id.searchtask.service.Matcher.SEARCH_RESULT_MAP;
-import static com.big.id.searchtask.service.Matcher.recursiveSearcherThreshold;
-
+@AllArgsConstructor
 public class RecursiveSearcher extends RecursiveAction {
-
+    private final int threshold;
     private final List<String> names;
+    private final transient ConcurrentMap<String, List<NameOffset>> searchResultMap;
     private final transient List<OffsetDto> offsetDtos;
-
-    public RecursiveSearcher(@NonNull final List<String> names,
-                             @NonNull final List<OffsetDto> offsetDtos) {
-        this.names = names;
-        this.offsetDtos = offsetDtos;
-    }
 
     @Override
     protected void compute() {
-        if (offsetDtos.size() <= recursiveSearcherThreshold) {
+        if (offsetDtos.size() <= threshold) {
             enrichMap();
         } else {
-            final var crt1 = new RecursiveSearcher(names, offsetDtos.subList(0, offsetDtos.size() / 2));
-            final var crt2 = new RecursiveSearcher(names, offsetDtos.subList(offsetDtos.size() / 2, offsetDtos.size()));
+            final var crt1 = new RecursiveSearcher(threshold, names, searchResultMap, offsetDtos.subList(0, offsetDtos.size() / 2));
+            final var crt2 = new RecursiveSearcher(threshold, names, searchResultMap, offsetDtos.subList(offsetDtos.size() / 2, offsetDtos.size()));
             invokeAll(crt1, crt2);
         }
     }
@@ -38,55 +33,87 @@ public class RecursiveSearcher extends RecursiveAction {
         offsetDtos.forEach(dto ->
                 names.forEach(name -> {
                     final var singleContentLine = dto.getContentValue().toLowerCase();
-                    if (singleContentLine.contains(name.toLowerCase())) {
-                        var namePositionInContentLine = singleContentLine.indexOf(name.toLowerCase());
-                        var charOffset = dto.getContentValuePosition() + namePositionInContentLine;
-
-                        processContent(dto.getLinePosition(), charOffset, namePositionInContentLine, name);
-
-                        final var repeatedNamesAmount = findAmountOfRepeatedNames(singleContentLine, name.toLowerCase());
-
-                        if (repeatedNamesAmount > 1) {
-                            processContentWithRepetitiveNames(name, dto, singleContentLine, namePositionInContentLine, repeatedNamesAmount);
+                    final var namePositionInContentLine = singleContentLine.indexOf(name.toLowerCase());
+                    if (namePositionInContentLine != -1) {
+                        final var repeatedNamesPosition = findRepeatedNamesPosition(singleContentLine, name.toLowerCase());
+                        if (repeatedNamesPosition.size() > 1) {
+                            processContentWithRepetitiveNames(name, dto, repeatedNamesPosition, singleContentLine);
+                        } else if (isNameMatches(singleContentLine, name)) {
+                            processContentWithSingleNameInIt(name, dto, namePositionInContentLine);
                         }
                     }
                 }));
     }
 
-    private void processContent(final int lineOffset,
-                                final int charOffset,
-                                final int namePositionInContentLine,
-                                @NonNull final String name) {
-        final List<NameOffset> nameOffsets = SEARCH_RESULT_MAP.get(name);
+    private void processContentWithSingleNameInIt(@NonNull final String name,
+                                                  @NonNull final OffsetDto offsetDto,
+                                                  final int namePositionInContentLine) {
+        final List<NameOffset> nameOffsets = searchResultMap.get(name);
+        final int charOffset = offsetDto.getContentValuePosition() + namePositionInContentLine;
 
         if (nameOffsets == null) {
-            addNewNameOffsetToMap(lineOffset, charOffset, namePositionInContentLine, name);
+            addNewNameOffsetToMap(offsetDto.getLinePosition(), charOffset, name);
         } else {
-            nameOffsets.add(new NameOffset(lineOffset, charOffset, namePositionInContentLine));
+            nameOffsets.add(new NameOffset(offsetDto.getLinePosition(), charOffset));
         }
     }
 
     private void addNewNameOffsetToMap(final int lineOffset,
                                        final int charOffset,
-                                       final int namePositionInContentLine,
                                        @NonNull final String name) {
         final var offsetList = new ArrayList<NameOffset>();
-        offsetList.add(new NameOffset(lineOffset, charOffset, namePositionInContentLine));
-        SEARCH_RESULT_MAP.put(name, offsetList);
+        offsetList.add(new NameOffset(lineOffset, charOffset));
+        searchResultMap.put(name, offsetList);
     }
 
-    private long findAmountOfRepeatedNames(@NonNull final String singleContentLine,
-                                           @NonNull final String name) {
-        return Arrays.stream(singleContentLine.split(" ")).filter(s -> s.contains(name)).count();
-    }
+    @NonNull
+    private List<Integer> findRepeatedNamesPosition(@NonNull final String singleContentLine,
+                                                    @NonNull final String name) {
+        final var indexes = new ArrayList<Integer>();
+        var nameLength = 0;
+        var index = 0;
 
-    private void processContentWithRepetitiveNames(@NonNull final String name, @NonNull final OffsetDto offsetDto,
-                                                   @NonNull final String singleContentLine, int namePositionInContentLine,
-                                                   final long repeatedNamesAmount) {
-        for (int i = 1; i < repeatedNamesAmount; i++) {
-            namePositionInContentLine = singleContentLine.indexOf(name.toLowerCase(), namePositionInContentLine + 1);
-            var charOffset = offsetDto.getContentValuePosition() + namePositionInContentLine;
-            processContent(offsetDto.getLinePosition(), charOffset, namePositionInContentLine, name);
+        while (index != -1) {
+            index = singleContentLine.indexOf(name, index + nameLength);
+            if (index != -1) {
+                indexes.add(index);
+            }
+            nameLength = name.length();
         }
+        return indexes;
+    }
+
+    private boolean isNameMatches(@NonNull final String singleContentLine,
+                                  @NonNull final String name) {
+        return Pattern.compile(".*\\b" + name.toLowerCase() + "\\b.*").matcher(singleContentLine).matches();
+    }
+
+    private void processContentWithRepetitiveNames(@NonNull final String name,
+                                                   @NonNull final OffsetDto offsetDto,
+                                                   @NonNull final List<Integer> repeatedNamesPosition,
+                                                   @NonNull final String singleContentLine) {
+        repeatedNamesPosition
+                .stream()
+                .filter(position -> getStringWhichContainsName(name, singleContentLine, position)
+                        .replaceAll("[^a-zA-Z0-9]+", "").equalsIgnoreCase(name))
+                .forEach(index -> processContentWithSingleNameInIt(name, offsetDto, index));
+    }
+
+    @NonNull
+    private String getStringWhichContainsName(@NonNull final String name,
+                                              @NonNull final String singleContentLine,
+                                              @NonNull final Integer positionOfWordWhichContainsName) {
+        final String subStringWhichContainsName;
+        if (positionOfWordWhichContainsName == 0) {
+            subStringWhichContainsName = singleContentLine.substring(positionOfWordWhichContainsName, positionOfWordWhichContainsName + name.length());
+        } else {
+            final var substring = singleContentLine.substring(positionOfWordWhichContainsName - 1, positionOfWordWhichContainsName + name.length());
+            if (singleContentLine.endsWith(substring)) {
+                subStringWhichContainsName = substring;
+            } else {
+                subStringWhichContainsName = singleContentLine.substring(positionOfWordWhichContainsName - 1, positionOfWordWhichContainsName + name.length() + 1);
+            }
+        }
+        return subStringWhichContainsName;
     }
 }

@@ -8,7 +8,6 @@ public class NameOffset {
     private int lineOffset;
     // name position relative to the entire file
     private int charOffset;
-    private int namePositionInContentLine;
 
     @Override
     public String toString() {
@@ -17,8 +16,6 @@ public class NameOffset {
                 .append(lineOffset)
                 .append(", charOffset=")
                 .append(charOffset)
-                .append(", namePositionInContentLine=")
-                .append(namePositionInContentLine)
                 .append("]")
                 .toString();
     }

@@ -13,7 +13,7 @@ public class Aggregator {
                 .forEach((firstName, offsetList) ->
                         System.out.println(new StringBuilder()
                                 .append(firstName)
-                                .append(" -->")
+                                .append(" --> ")
                                 .append(offsetList)));
     }
 }
